@@ -48,7 +48,7 @@ const app = express();
 // 1. PROTEÇÕES E CONFIGURAÇÕES GLOBAIS
 // ==========================================
 
-// Necessário se o servidor estiver atrás de um proxy (ex: Vercel, Heroku, Nginx)
+// Necessário se o servidor estiver atrás de um proxy (ex: Vercel, Heroku, Nginx, Render)
 app.set('trust proxy', 1); 
 
 // Helmet adiciona cabeçalhos HTTP de segurança automaticamente contra ataques XSS e Clickjacking
@@ -68,8 +68,8 @@ const allowedOrigins = [
   'http://localhost:3000',        
   'https://fluxo-royale.vercel.app', 
   'https://fluxoroyale21.vercel.app',
-  'https://fluxo-royale.com.br',       // Domínio oficial
-  'https://www.fluxo-royale.com.br'    // Subdomínio oficial
+  'https://fluxo-royale.com.br',       // Domínio oficial de Produção
+  'https://www.fluxo-royale.com.br'    // Subdomínio oficial de Produção
 ];
 
 const corsOptions = {
@@ -77,21 +77,27 @@ const corsOptions = {
     // Permite requisições sem origem definida (ex: Postman, Insomnia, scripts do próprio server)
     if (!origin) return callback(null, true);
     
-    // Verifica se a origem está na lista de permitidas
+    // Verifica se a origem está na lista EXATA de permitidas
     if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
     
+    // 🟢 NOVA REGRA: Permite qualquer domínio/subdomínio da Vercel e Render (Ideal para Homologação)
+    if (origin.endsWith('.vercel.app') || origin.endsWith('.onrender.com')) {
+        return callback(null, true);
+    }
+
     // Permite qualquer conexão que venha de desenvolvimento local (localhost ou rede interna)
     if (origin.startsWith('http://localhost') || origin.startsWith('http://192.168.')) {
         return callback(null, true);
     }
     
     // Se não passar em nenhuma regra, bloqueia a conexão
-    return callback(new Error('Bloqueio CORS: Origem não permitida'), false);
+    return callback(new Error('Bloqueio CORS: Origem não permitida pela política de segurança.'), false);
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true // Importante para cookies ou tokens de sessão
 };
+
 app.use(cors(corsOptions));
 
 // ==========================================
