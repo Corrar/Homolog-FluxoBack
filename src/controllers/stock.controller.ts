@@ -527,3 +527,17 @@ export const transferStock = async (req: Request, res: Response) => {
     client.release(); // Liberta a conexão do banco de dados para evitar vazamentos
   }
 };
+
+// =========================================================================
+// NOVO ENDPOINT: LISTAR ARMAZÉNS
+// =========================================================================
+
+export const getWarehouses = async (req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query('SELECT id, nome, tipo FROM armazens ORDER BY nome ASC');
+    res.status(200).json(rows);
+  } catch (error: any) {
+    console.error('Erro ao buscar armazéns:', error);
+    res.status(500).json({ error: 'Erro interno ao buscar a lista de armazéns.' });
+  }
+};
