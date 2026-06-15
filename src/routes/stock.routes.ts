@@ -10,7 +10,8 @@ import {
   getOpMaterialsForReturn, 
   registerReturn,
   registerEntries,
-  transferStock // 🚀 IMPORTAMOS AQUI A NOSSA NOVA FUNÇÃO DO CONTROLLER
+  transferStock,
+  getWarehouses // 🚀 IMPORTAMOS A NOSSA NOVA FUNÇÃO DE LER ARMAZÉNS
 } from '../controllers/stock.controller';
 
 const router = Router();
@@ -83,8 +84,14 @@ router.get('/returns/op/:opCode', getOpMaterialsForReturn);
 router.post('/returns', registerReturn);
 
 // =========================================================================
-// 🚀 NOVA ROTA: TRANSFERÊNCIA DE ARMAZÉNS
+// 🚀 NOVAS ROTAS: MULTI-ARMAZÉNS E TRANSFERÊNCIAS
 // =========================================================================
+
+/**
+ * @route GET /stock/warehouses
+ * @description Retorna a lista de armazéns/setores cadastrados na base de dados.
+ */
+router.get('/warehouses', getWarehouses);
 
 /**
  * @route POST /stock/transfer
