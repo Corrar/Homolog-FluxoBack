@@ -541,3 +541,45 @@ export const getWarehouses = async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Erro interno ao buscar a lista de armazéns.' });
   }
 };
+
+// =========================================================================
+// NOVO ENDPOINT: VER ESTOQUE DE TODOS OS ARMAZÉNS/SETORES
+// =========================================================================
+
+export const getWarehouseStock = async (req: Request, res: Response) => {
+  try {
+    const { armazemId } = req.query; // Permite filtrar por um armazém específico
+    
+    let query = `
+      SELECT ea.id, ea.quantidade, a.nome as armazem_nome, a.tipo as armazem_tipo,
+             op.numero_op,
+             json_build_object(
+               'id', p.id, 
+               'name', p.name, 
+               'sku', p.sku, 
+               'unit', p.unit
+             ) as products
+      FROM estoque_armazem ea
+      JOIN products p ON ea.product_id = p.id
+      JOIN armazens a ON ea.armazem_id = a.id
+      LEFT JOIN ordens_producao op ON ea.op_id = op.id
+      WHERE ea.quantidade > 0
+    `;
+    
+    const params: any[] = [];
+    
+    // Se o frontend enviar um ID de armazém específico, filtramos
+    if (armazemId && armazemId !== 'all') {
+      params.push(armazemId);
+      query += ` AND ea.armazem_id = $1`;
+    }
+    
+    query += ` ORDER BY a.nome ASC, p.name ASC`;
+
+    const { rows } = await pool.query(query, params);
+    res.status(200).json(rows);
+  } catch (error: any) {
+    console.error('Erro ao buscar estoque dos armazéns:', error);
+    res.status(500).json({ error: 'Erro interno ao buscar o estoque dos setores.' });
+  }
+};
