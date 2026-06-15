@@ -169,11 +169,10 @@ export const createRequest = async (req: Request, res: Response) => {
       const isCustom = item.product_id === 'custom' || !item.product_id;
       const productId = isCustom ? null : item.product_id;
       const customName = isCustom ? item.custom_name : null;
-      const priority = item.priority || 'Média'; // Lê a prioridade do frontend
+      const priority = item.priority || 'Média'; 
       let is3D = false;
 
       if (productId) {
-        // Busca a quantidade disponível E o status is_3d do produto
         const productCheck = await client.query(
             `SELECT p.is_3d, (COALESCE(s.quantity_on_hand, 0) - COALESCE(s.quantity_reserved, 0)) as available 
              FROM products p LEFT JOIN stock s ON p.id = s.product_id 
@@ -184,12 +183,10 @@ export const createRequest = async (req: Request, res: Response) => {
         const available = parseFloat(productCheck.rows[0]?.available || 0);
         is3D = productCheck.rows[0]?.is_3d || false;
 
-        // LÓGICA INTELIGENTE: ESTOQUE + FÁBRICA 3D
         if (is3D) {
             let missingQty = item.quantity;
             let reservedQty = 0;
 
-            // 1. Se tem pelo menos 1 no estoque, reserva logo essa quantidade
             if (available > 0) {
                 reservedQty = Math.min(item.quantity, available);
                 missingQty = item.quantity - reservedQty;
@@ -200,11 +197,8 @@ export const createRequest = async (req: Request, res: Response) => {
                 );
             }
 
-            // 2. Se FALTAR peças, vai para a fábrica produzir
             if (missingQty > 0) {
                 const kanbanOpNumber = op_code ? op_code : 'Interno';
-                
-                // INFORMA O QUANTO JÁ TEM NO ESTOQUE DIRETAMENTE NAS NOTAS DO KANBAN
                 const notesInfo = `⚠️ RESUMO DO PEDIDO:\n- A Produzir: ${missingQty} un.\n- Já em Estoque: ${reservedQty} un.\n- Total Solicitado: ${item.quantity} un.\n\n📝 OBSERVAÇÕES:\n${item.observation || 'Nenhuma'}`;
 
                 await client.query(
@@ -214,14 +208,12 @@ export const createRequest = async (req: Request, res: Response) => {
                 );
             }
         } 
-        // LÓGICA NORMAL PARA PRODUTOS NÃO 3D
         else {
             if (available < item.quantity) throw new Error(`Estoque disponível insuficiente para o produto ID: ${productId}`);
             await client.query(`UPDATE stock SET quantity_reserved = COALESCE(quantity_reserved, 0) + $1 WHERE product_id = $2`, [item.quantity, productId]);
         }
       }
       
-      // Regista o item na solicitação original (Aparece no painel do Almoxarife para entregar o que já tem)
       await client.query(
         'INSERT INTO request_items (request_id, product_id, custom_product_name, quantity_requested, observation, client_service) VALUES ($1, $2, $3, $4, $5, $6)', 
         [requestId, productId, customName, item.quantity, item.observation || null, item.client_service || null]
@@ -245,11 +237,8 @@ export const createRequest = async (req: Request, res: Response) => {
     if ((req as any).io) {
         const notificationData = { id: `req-${requestId}-${Date.now()}`, message: `📢 Nova solicitação do setor: ${sector}`, action: 'Ver Pedidos', type: 'solicitacao' };
         (req as any).io.to(['almoxarife', 'admin', 'escritorio']).emit('new_request_notification', notificationData);
-        
-        // 🟢 Otimização: O front-end já captura 'new_request' e adiciona no topo da lista. (Correto)
         (req as any).io.to(['almoxarife', 'admin', 'escritorio']).emit('new_request', fullReqRows[0]);
         
-        // 🟢 Otimização: Em vez de 'refresh_stock', enviamos os produtos específicos alterados.
         const changedProducts = sortedItems.map(item => item.product_id).filter(id => id && id !== 'custom');
         if (changedProducts.length > 0) {
             (req as any).io.emit('stock_updated', { changedProducts }); 
@@ -271,7 +260,6 @@ export const createRequest = async (req: Request, res: Response) => {
     });
 
     const nomeSolicitante = fullReqRows[0].requester?.name || 'Usuário';
-    
     const avisoOp = op_code ? `\nOP: ${op_code}` : `\nOP: Isento (EPI/Ferramenta/Insumo)`;
     const mensagemPersonalizada = `Setor: ${sector}${avisoOp}\nData/Hora: ${dataFormatada} - ${horaFormatada}\nMateriais:${listaMateriais}`;
 
@@ -302,9 +290,12 @@ export const updateRequestStatus = async (req: Request, res: Response) => {
     if (userCheck.rows[0]?.role !== 'admin' && userCheck.rows[0]?.role !== 'almoxarife') return res.status(403).json({ error: 'Sem permissão.' });
 
     await client.query('BEGIN');
-    const currentRes = await client.query('SELECT status FROM requests WHERE id = $1 FOR UPDATE', [id]);
+    const currentRes = await client.query('SELECT status, sector, client_service_id FROM requests WHERE id = $1 FOR UPDATE', [id]);
     if (!currentRes.rows[0]?.status) throw new Error("Solicitação não encontrada");
+    
     const currentStatus = currentRes.rows[0].status;
+    const reqSector = currentRes.rows[0].sector;
+    const clientServiceId = currentRes.rows[0].client_service_id;
 
     // Se houve ajuste manual das quantidades pelo almoxarife antes da entrega
     if (adjusted_items && Array.isArray(adjusted_items)) {
@@ -319,7 +310,6 @@ export const updateRequestStatus = async (req: Request, res: Response) => {
              await client.query('UPDATE request_items SET quantity_delivered = $1 WHERE id = $2', [newReserved, adj.id]);
              
              if (item.product_id && oldReserved !== newReserved && (currentStatus === 'aberto' || currentStatus === 'aprovado')) {
-                // Ao ajustar a quantidade no pedido, precisamos ajustar a reserva correspondente no stock
                 const stockVal = await client.query('SELECT quantity_reserved FROM stock WHERE product_id = $1', [item.product_id]);
                 if (parseFloat(stockVal.rows[0]?.quantity_reserved || 0) > 0) {
                     const delta = newReserved - oldReserved;
@@ -331,33 +321,124 @@ export const updateRequestStatus = async (req: Request, res: Response) => {
     }
 
     const itemsRes = await client.query('SELECT ri.product_id, ri.quantity_requested, ri.quantity_delivered, p.is_3d FROM request_items ri LEFT JOIN products p ON ri.product_id = p.id WHERE ri.request_id = $1 ORDER BY ri.product_id', [id]);
+
+    // ==========================================
+    // 🚀 RESOLUÇÃO DOS ARMAZÉNS E OP (MULTI-FILIAL)
+    // ==========================================
+    let armazemDestinoId = null;
+    let armazemOrigemId = null;
+    let reqOpId = null;
+
+    if (status === 'entregue' || status === 'devolvido') {
+        // 1. Localiza o ID da OP caso exista
+        if (clientServiceId) {
+            const csRes = await client.query('SELECT op_code FROM client_services WHERE id = $1', [clientServiceId]);
+            if (csRes.rows.length > 0) {
+                const opRes = await client.query('SELECT id FROM ordens_producao WHERE numero_op = $1', [csRes.rows[0].op_code]);
+                if (opRes.rows.length > 0) reqOpId = opRes.rows[0].id;
+            }
+        }
+
+        // 2. Garante o Armazém do Setor Solicitante
+        if (reqSector) {
+            let armazemRes = await client.query('SELECT id FROM armazens WHERE nome ILIKE $1', [reqSector]);
+            if (armazemRes.rows.length === 0) {
+                armazemRes = await client.query("INSERT INTO armazens (nome, tipo) VALUES ($1, 'setor') RETURNING id", [reqSector]);
+            }
+            armazemDestinoId = armazemRes.rows[0].id;
+        }
+
+        // 3. Garante o Armazém Principal (Origem)
+        let armazemOrigemRes = await client.query("SELECT id FROM armazens WHERE tipo = 'principal' LIMIT 1");
+        if (armazemOrigemRes.rows.length > 0) {
+            armazemOrigemId = armazemOrigemRes.rows[0].id;
+        } else {
+            armazemOrigemRes = await client.query("INSERT INTO armazens (nome, tipo) VALUES ('Almoxarifado Principal', 'principal') RETURNING id");
+            armazemOrigemId = armazemOrigemRes.rows[0].id;
+        }
+    }
     
-    // Status: Entregue
+    // =======================================================
+    // APLICAÇÃO DOS STATUS E TRANSFERÊNCIAS 
+    // =======================================================
+
+    // Status: Entregue (Sai do Almoxarifado, Entra no Armazém do Setor)
     if (status === 'entregue' && (currentStatus === 'aberto' || currentStatus === 'aprovado')) {
       for (const item of itemsRes.rows) {
-        if (item.product_id && !item.is_3d) { // Só desconta stock físico se NÃO FOR 3D
+        if (item.product_id && !item.is_3d) { 
           const finalQty = parseFloat(item.quantity_delivered ?? item.quantity_requested);
+          
+          // Baixa no Estoque Físico Geral (Mantido para integridade)
           const stockCheck = await client.query('SELECT quantity_on_hand FROM stock WHERE product_id = $1 FOR UPDATE', [item.product_id]);
           if (parseFloat(stockCheck.rows[0]?.quantity_on_hand || 0) < finalQty) throw new Error(`Furo de Estoque no produto ID ${item.product_id}.`);
           await client.query(`UPDATE stock SET quantity_on_hand = quantity_on_hand - $1, quantity_reserved = GREATEST(0, quantity_reserved - $1) WHERE product_id = $2`, [finalQty, item.product_id]);
+
+          // Entrada Automática na gaveta do Setor
+          if (armazemDestinoId) {
+             const destCheck = await client.query(
+                'SELECT id FROM estoque_armazem WHERE product_id = $1 AND armazem_id = $2 AND op_id IS NOT DISTINCT FROM $3', 
+                [item.product_id, armazemDestinoId, reqOpId || null]
+             );
+             
+             if (destCheck.rows.length > 0) {
+                 await client.query('UPDATE estoque_armazem SET quantidade = quantidade + $1 WHERE id = $2', [finalQty, destCheck.rows[0].id]);
+             } else {
+                 try {
+                     await client.query('INSERT INTO estoque_armazem (product_id, armazem_id, op_id, quantidade) VALUES ($1, $2, $3, $4)', [item.product_id, armazemDestinoId, reqOpId || null, finalQty]);
+                 } catch(e) {
+                     // Fallback se FK falhar
+                     await client.query('INSERT INTO estoque_armazem (product_id, armazem_id, quantidade) VALUES ($1, $2, $3)', [item.product_id, armazemDestinoId, finalQty]);
+                 }
+             }
+
+             // Gera o histórico inviolável de transferência
+             try {
+                 await client.query(`
+                    INSERT INTO movimentacao_estoque (product_id, armazem_origem_id, armazem_destino_id, op_destino_id, quantidade, tipo_movimento, observacao, user_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 `, [item.product_id, armazemOrigemId, armazemDestinoId, reqOpId || null, finalQty, 'ENTREGA_SOLICITACAO', `Entregue via Req #${id.substring(0,8)}`, userId]);
+             } catch(e) {
+                  await client.query(`
+                    INSERT INTO movimentacao_estoque (product_id, armazem_origem_id, armazem_destino_id, quantidade, tipo_movimento, observacao, user_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 `, [item.product_id, armazemOrigemId, armazemDestinoId, finalQty, 'ENTREGA_SOLICITACAO', `Entregue via Req #${id.substring(0,8)}`, userId]);
+             }
+          }
         }
       }
     } 
     // Status: Rejeitado
     else if (status === 'rejeitado' && (currentStatus === 'aberto' || currentStatus === 'aprovado')) {
       for (const item of itemsRes.rows) {
-        if (item.product_id && !item.is_3d) { // Só devolve reserva se NÃO FOR 3D
+        if (item.product_id && !item.is_3d) { 
             const finalQty = parseFloat(item.quantity_delivered ?? item.quantity_requested);
             await client.query(`UPDATE stock SET quantity_reserved = GREATEST(0, COALESCE(quantity_reserved, 0) - $1) WHERE product_id = $2`, [finalQty, item.product_id]);
         }
       }
     }
-    // Status: Devolvido (Retornou para a prateleira) - Mantido para caso queiram devolver tudo de uma vez
+    // Status: Devolvido Total (Retornou para a prateleira)
     else if (status === 'devolvido' && currentStatus === 'entregue') {
       for (const item of itemsRes.rows) {
-        if (item.product_id && !item.is_3d) { // Só volta para prateleira se NÃO FOR 3D
+        if (item.product_id && !item.is_3d) { 
             const finalQty = parseFloat(item.quantity_delivered ?? item.quantity_requested);
+            
+            // Devolve ao estoque geral
             await client.query(`UPDATE stock SET quantity_on_hand = quantity_on_hand + $1 WHERE product_id = $2`, [finalQty, item.product_id]);
+            
+            // 🚀 Subtrai da gaveta do setor (Desfaz a transferência)
+            if (armazemDestinoId) {
+                const destCheck = await client.query('SELECT id FROM estoque_armazem WHERE product_id = $1 AND armazem_id = $2 AND op_id IS NOT DISTINCT FROM $3', [item.product_id, armazemDestinoId, reqOpId || null]);
+                if (destCheck.rows.length > 0) {
+                    await client.query('UPDATE estoque_armazem SET quantidade = GREATEST(0, quantidade - $1) WHERE id = $2', [finalQty, destCheck.rows[0].id]);
+                }
+                
+                try {
+                    await client.query(`
+                        INSERT INTO movimentacao_estoque (product_id, armazem_origem_id, armazem_destino_id, op_origem_id, quantidade, tipo_movimento, observacao, user_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    `, [item.product_id, armazemDestinoId, armazemOrigemId, reqOpId || null, finalQty, 'DEVOLUCAO_SOLICITACAO', `Devolução Total Req #${id.substring(0,8)}`, userId]);
+                } catch(e) {}
+            }
         }
       }
     }
@@ -369,7 +450,6 @@ export const updateRequestStatus = async (req: Request, res: Response) => {
     
     await client.query('COMMIT');
 
-    // 🟢 Otimização: Enviamos APENAS os dados atualizados em vez do comando cego de recarga
     if ((req as any).io) { 
         (req as any).io.emit('request_updated', { id, status, rejection_reason }); 
         
@@ -403,7 +483,6 @@ export const deleteRequest = async (req: Request, res: Response) => {
     
     let itemsRes: any;
     if (status === 'aberto' || status === 'aprovado') {
-       // Puxa o status is_3d também para não tentar cancelar reservas de algo que nunca foi reservado
        itemsRes = await client.query('SELECT ri.product_id, ri.quantity_requested, ri.quantity_delivered, p.is_3d FROM request_items ri LEFT JOIN products p ON ri.product_id = p.id WHERE ri.request_id = $1', [id]);
        for (const item of itemsRes.rows) {
          if (item.product_id && !item.is_3d) {
@@ -415,13 +494,11 @@ export const deleteRequest = async (req: Request, res: Response) => {
 
     await client.query("UPDATE requests SET status = 'rejeitado', rejection_reason = 'Cancelado pelo usuário/sistema' WHERE id = $1", [id]);
     
-    // Se havia uma cópia no Kanban 3D pendente, também "cancela" ela
     await client.query("UPDATE demands_3d SET status = 'Cancelada' WHERE request_id = $1 AND status != 'Concluída'", [id]);
 
     await createLog(userId, 'CANCELAR_SOLICITACAO', { id_solicitacao: id, status_anterior: status }, getClientIp(req), client);
     await client.query('COMMIT');
     
-    // 🟢 Otimização: Evitar 'refresh' forçado. Avisar qual pedido mudou e quais produtos afetaram o stock.
     if ((req as any).io) { 
         (req as any).io.emit('request_updated', { id, status: 'rejeitado', rejection_reason: 'Cancelado pelo usuário/sistema' }); 
         
@@ -445,9 +522,9 @@ export const deleteRequest = async (req: Request, res: Response) => {
 // =========================================================================
 
 export const partialReturnRequest = async (req: Request, res: Response) => {
-  const { id } = req.params; // ID do Request
+  const { id } = req.params; 
   const userId = (req as any).user.id;
-  const { returns } = req.body; // Array: [{ request_item_id, quantity_to_return }]
+  const { returns } = req.body; 
   const client = await pool.connect();
   
   try {
@@ -456,17 +533,36 @@ export const partialReturnRequest = async (req: Request, res: Response) => {
 
     await client.query('BEGIN');
 
-    // Verifica o status do pedido e se tem uma OP associada
-    const reqRes = await client.query('SELECT status, client_service_id FROM requests WHERE id = $1', [id]);
+    const reqRes = await client.query('SELECT status, client_service_id, sector FROM requests WHERE id = $1', [id]);
     if (!reqRes.rows[0] || reqRes.rows[0].status !== 'entregue') {
         throw new Error("Apenas solicitações 'entregues' podem ter itens devolvidos.");
     }
+    
     const client_service_id = reqRes.rows[0].client_service_id;
+    const reqSector = reqRes.rows[0].sector;
+
+    // Localiza OP e Armazéns para desfazer no multi-filial
+    let armazemDestinoId = null;
+    let reqOpId = null;
+    let armazemOrigemId = null;
+
+    if (client_service_id) {
+        const csRes = await client.query('SELECT op_code FROM client_services WHERE id = $1', [client_service_id]);
+        if (csRes.rows.length > 0) {
+            const opRes = await client.query('SELECT id FROM ordens_producao WHERE numero_op = $1', [csRes.rows[0].op_code]);
+            if (opRes.rows.length > 0) reqOpId = opRes.rows[0].id;
+        }
+    }
+    if (reqSector) {
+        let armazemRes = await client.query('SELECT id FROM armazens WHERE nome ILIKE $1', [reqSector]);
+        if (armazemRes.rows.length > 0) armazemDestinoId = armazemRes.rows[0].id;
+    }
+    let armazemOrigemRes = await client.query("SELECT id FROM armazens WHERE tipo = 'principal' LIMIT 1");
+    if (armazemOrigemRes.rows.length > 0) armazemOrigemId = armazemOrigemRes.rows[0].id;
 
     for (const ret of returns) {
       if (ret.quantity_to_return <= 0) continue;
 
-      // Verifica o item específico
       const itemCheck = await client.query(
           'SELECT product_id, quantity_delivered, quantity_requested, quantity_returned, is_3d FROM request_items ri LEFT JOIN products p ON ri.product_id = p.id WHERE ri.id = $1', 
           [ret.request_item_id]
@@ -481,15 +577,27 @@ export const partialReturnRequest = async (req: Request, res: Response) => {
           throw new Error(`Não podes devolver mais do que foi entregue para o produto.`);
       }
 
-      // 1. Atualiza o item do pedido com a nova quantidade devolvida
       await client.query('UPDATE request_items SET quantity_returned = COALESCE(quantity_returned, 0) + $1 WHERE id = $2', [returnQty, ret.request_item_id]);
 
-      // 2. Devolve ao stock físico (se não for 3D)
       if (item.product_id && !item.is_3d) {
+          // Devolve ao estoque geral
           await client.query('UPDATE stock SET quantity_on_hand = quantity_on_hand + $1 WHERE product_id = $2', [returnQty, item.product_id]);
+          
+          // 🚀 Retira da gaveta do setor
+          if (armazemDestinoId) {
+             const destCheck = await client.query('SELECT id FROM estoque_armazem WHERE product_id = $1 AND armazem_id = $2 AND op_id IS NOT DISTINCT FROM $3', [item.product_id, armazemDestinoId, reqOpId || null]);
+             if (destCheck.rows.length > 0) {
+                 await client.query('UPDATE estoque_armazem SET quantidade = GREATEST(0, quantidade - $1) WHERE id = $2', [returnQty, destCheck.rows[0].id]);
+             }
+             try {
+                 await client.query(`
+                    INSERT INTO movimentacao_estoque (product_id, armazem_origem_id, armazem_destino_id, op_origem_id, quantidade, tipo_movimento, observacao, user_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 `, [item.product_id, armazemDestinoId, armazemOrigemId, reqOpId || null, returnQty, 'DEVOLUCAO_SOLICITACAO', `Devolução parcial Req #${id.substring(0,8)}`, userId]);
+             } catch(e) {}
+          }
       }
 
-      // 3. Se houver OP (client_service_id), regista na tabela op_returns para o consumo da OP ficar correto
       if (client_service_id && item.product_id) {
           await client.query(`
               INSERT INTO op_returns (client_service_id, product_id, quantity, user_id, observation)
@@ -498,12 +606,10 @@ export const partialReturnRequest = async (req: Request, res: Response) => {
       }
     }
 
-    // Regista no log do sistema
     await createLog(userId, 'DEVOLUCAO_PARCIAL', { id_solicitacao: id }, getClientIp(req), client);
     
     await client.query('COMMIT');
 
-    // Avisa o frontend para atualizar as tabelas afetadas
     if ((req as any).io) { 
         (req as any).io.emit('refresh_requests');
         (req as any).io.emit('refresh_stock');
