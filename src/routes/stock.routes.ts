@@ -9,7 +9,8 @@ import {
   manualWithdrawal,
   getOpMaterialsForReturn, 
   registerReturn,
-  registerEntries // A nova função do controller
+  registerEntries,
+  transferStock // 🚀 IMPORTAMOS AQUI A NOSSA NOVA FUNÇÃO DO CONTROLLER
 } from '../controllers/stock.controller';
 
 const router = Router();
@@ -61,7 +62,7 @@ router.post('/manual-withdrawal', manualWithdrawal);
  * @description Registra entradas de lote vindas dos novos painéis (NFe, Reaproveitamentos).
  * @body { entries: Array<{ product_id: string, quantity: number, type: string, observation?: string }> }
  */
-router.post('/entries', registerEntries); // O Endpoint novo que fica no lugar da entrada manual
+router.post('/entries', registerEntries); 
 
 // =========================================================================
 // ROTAS DE DEVOLUÇÕES (OP)
@@ -80,5 +81,16 @@ router.get('/returns/op/:opCode', getOpMaterialsForReturn);
  * @body { op_code: string, returns: Array<{ product_id: string, quantity: number, observation?: string }> }
  */
 router.post('/returns', registerReturn);
+
+// =========================================================================
+// 🚀 NOVA ROTA: TRANSFERÊNCIA DE ARMAZÉNS
+// =========================================================================
+
+/**
+ * @route POST /stock/transfer
+ * @description Transfere produtos entre armazéns e gera registo de movimentação (Kardex).
+ * @body { produtoId, armazemOrigemId, opOrigemId, armazemDestinoId, opDestinoId, quantidade, observacao }
+ */
+router.post('/transfer', transferStock);
 
 export default router;
