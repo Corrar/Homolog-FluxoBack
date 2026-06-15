@@ -424,3 +424,106 @@ export const registerEntries = async (req: Request, res: Response) => {
     client.release();
   }
 };
+
+// =========================================================================
+// NOVO ENDPOINT: TRANSFERÊNCIA ENTRE ARMAZÉNS (COM RASTREABILIDADE)
+// =========================================================================
+
+export const transferStock = async (req: Request, res: Response) => {
+  // Recebemos os dados enviados pelo Frontend
+  const { 
+    produtoId, 
+    armazemOrigemId, 
+    opOrigemId, 
+    armazemDestinoId, 
+    opDestinoId, 
+    quantidade, 
+    observacao 
+  } = req.body;
+  
+  const userId = (req as any).user.id; // Quem está fazendo a operação
+
+  // Validação básica: precisamos saber o que transferir e de onde para onde
+  if (!produtoId || !armazemOrigemId || !armazemDestinoId || !quantidade || quantidade <= 0) {
+    return res.status(400).json({ error: 'Dados obrigatórios em falta ou quantidade inválida.' });
+  }
+
+  const client = await pool.connect(); // Iniciamos a conexão exclusiva para garantir a transação
+
+  try {
+    await client.query('BEGIN'); // Inicia a transação (tudo ou nada)
+
+    // 1. CHECAR SALDO DA ORIGEM: O material existe e é suficiente?
+    // Usamos o COALESCE e IS NOT DISTINCT FROM para tratar adequadamente as OPs que podem ser nulas (estoque livre).
+    const origemQuery = await client.query(`
+      SELECT id, quantidade 
+      FROM estoque_armazem 
+      WHERE product_id = $1 
+        AND armazem_id = $2 
+        AND op_id IS NOT DISTINCT FROM $3
+      FOR UPDATE
+    `, [produtoId, armazemOrigemId, opOrigemId || null]);
+
+    if (origemQuery.rows.length === 0 || parseFloat(origemQuery.rows[0].quantidade) < quantidade) {
+      throw new Error('Saldo insuficiente no armazém e OP de origem.');
+    }
+
+    const estoqueOrigemId = origemQuery.rows[0].id;
+
+    // 2. RETIRAR DA ORIGEM: Subtraímos a quantidade do registo atual
+    await client.query(`
+      UPDATE estoque_armazem 
+      SET quantidade = quantidade - $1 
+      WHERE id = $2
+    `, [quantidade, estoqueOrigemId]);
+
+    // 3. ADICIONAR NO DESTINO: Checamos se já existe um registo para este Produto + Armazém + OP
+    const destinoQuery = await client.query(`
+      SELECT id 
+      FROM estoque_armazem 
+      WHERE product_id = $1 
+        AND armazem_id = $2 
+        AND op_id IS NOT DISTINCT FROM $3
+    `, [produtoId, armazemDestinoId, opDestinoId || null]);
+
+    if (destinoQuery.rows.length > 0) {
+      // Se a "gaveta" já existe (mesmo produto, armazém e OP), apenas somamos a quantidade
+      await client.query(`
+        UPDATE estoque_armazem 
+        SET quantidade = quantidade + $1 
+        WHERE id = $2
+      `, [quantidade, destinoQuery.rows[0].id]);
+    } else {
+      // Se não existe, criamos um novo "espaço" para ele
+      await client.query(`
+        INSERT INTO estoque_armazem (product_id, armazem_id, op_id, quantidade)
+        VALUES ($1, $2, $3, $4)
+      `, [produtoId, armazemDestinoId, opDestinoId || null, quantidade]);
+    }
+
+    // 4. REGISTO DE RASTREABILIDADE (KARDEX): Gravamos o comprovativo de quem fez o quê
+    await client.query(`
+      INSERT INTO movimentacao_estoque 
+      (product_id, armazem_origem_id, op_origem_id, armazem_destino_id, op_destino_id, quantidade, tipo_movimento, observacao, user_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `, [
+      produtoId, armazemOrigemId, opOrigemId || null, armazemDestinoId, opDestinoId || null, 
+      quantidade, 'TRANSFERENCIA', observacao || 'Transferência manual de setor', userId
+    ]);
+
+    // 5. REGISTO DE LOG GERAL DO SISTEMA (Aproveitando o seu sistema de logs atual)
+    await createLog(userId, 'STOCK_TRANSFER', { 
+      produtoId, quantidade, origem: armazemOrigemId, destino: armazemDestinoId 
+    }, getClientIp(req), client);
+
+    await client.query('COMMIT'); // Se chegou até aqui sem erros, confirma e salva tudo!
+    res.status(200).json({ success: true, message: 'Transferência efetuada com sucesso e rastreada!' });
+
+  } catch (error: any) {
+    await client.query('ROLLBACK'); // Se deu qualquer erro no caminho, desfaz tudo para não corromper o estoque
+    console.error('Erro na transferência:', error);
+    res.status(400).json({ error: error.message || 'Erro ao processar a transferência.' });
+  } finally {
+    client.release(); // Liberta a conexão do banco de dados para evitar vazamentos
+  }
+};
